@@ -1,9 +1,58 @@
-# 作业要求
-2026大作业题目.pdf
-2026课程设计打分标准.pdf
-
 # pycharm
 .idea/
 
 # claude code
 .claude/
+
+# python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg-info
+.eggs/
+
+# virtual environment
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# jupyter
+.ipynb_checkpoints/
+
+# environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# mypy
+.mypy_cache/
+
+# logs
+*.log
