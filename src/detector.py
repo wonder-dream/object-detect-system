@@ -1,91 +1,154 @@
-import os
-import shutil
-import tempfile
+"""目标检测模块 —— 统一封装两种检测方式。
+
+  - vj:   Viola-Jones 论文自实现 (积分图 + Haar 特征 + 级联分类器)
+  - haar: OpenCV 内置 Haar Cascade (用于对照)
+
+两种方式输出统一格式的结果列表，GUI 无需关心底层实现差异。
+"""
 
 import cv2
+import numpy as np
+
+from .cascade import CascadeDetector
 
 
 class Detector:
-    """目标检测模块，封装 Haar Cascade 和 DNN 两种检测方式。"""
+    """目标检测器统一接口。
 
-    def __init__(self, method="haar", model_path=None):
+    对外暴露单一的 detect(frame) 方法，内部根据 method 分发到
+    不同的检测实现。支持运行时切换方法 (修改 .method 属性)。
+
+    Usage:
+        d = Detector(method="vj")        # Viola-Jones 论文复现
+        d = Detector(method="haar")      # OpenCV 内置 Haar (对照)
+        results = d.detect(frame)        # 统一调用
+    """
+
+    def __init__(
+        self,
+        method: str = "vj",
+        cascade_xml: str | None = None,
+    ):
+        """初始化检测器。
+
+        Args:
+            method: 检测方式 ("vj" | "haar")
+            cascade_xml: Viola-Jones 自定义 cascade XML 路径
+        """
         self.method = method
-        self.net = None
-        self.class_names = []
-        self._temp_dir = None
 
+        # ── Viola-Jones 自实现 ──
+        self.vj_detector: CascadeDetector | None = None
+        if method == "vj":
+            # 默认使用 OpenCV 自带的正面人脸级联文件
+            xml_path = cascade_xml or (
+                cv2.data.haarcascades + "haarcascade_frontalface_alt.xml"
+            )
+            self.vj_detector = CascadeDetector(xml_path)
+
+        # ── OpenCV 内置 Haar Cascade (对照) ──
+        self.face_cascade: cv2.CascadeClassifier | None = None
+        self.profile_cascade: cv2.CascadeClassifier | None = None
         if method == "haar":
-            self._temp_dir = tempfile.mkdtemp(prefix="cv_cascades_")
-            self.face_cascade = self._load_cascade("haarcascade_frontalface_alt.xml")
-            self.profile_cascade = self._load_cascade("haarcascade_profileface.xml")
-        elif method == "dnn" and model_path:
-            self._load_dnn(model_path)
+            self.face_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_alt.xml"
+            )
+            # 侧脸级联 (备用)
+            self.profile_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_profileface.xml"
+            )
 
-    def _load_cascade(self, filename):
-        src = cv2.data.haarcascades + filename
-        dst = os.path.join(self._temp_dir, filename)
-        shutil.copy2(src, dst)
-        cascade = cv2.CascadeClassifier(dst)
-        if cascade.empty():
-            raise RuntimeError(f"无法加载级联分类器: {filename}")
-        return cascade
+    # ── 统一检测接口 ─────────────────────────────────────
 
-    def __del__(self):
-        if self._temp_dir and os.path.isdir(self._temp_dir):
-            shutil.rmtree(self._temp_dir, ignore_errors=True)
+    def detect(self, frame: np.ndarray) -> list[dict]:
+        """对单帧执行目标检测。
 
-    def _load_dnn(self, model_path):
-        self.net = cv2.dnn.readNetFromCaffe(
-            model_path + ".prototxt", model_path + ".caffemodel"
-        )
-        self.class_names = [
-            "background", "aeroplane", "bicycle", "bird", "boat",
-            "bottle", "bus", "car", "cat", "chair", "cow",
-            "diningtable", "dog", "horse", "motorbike", "person",
-            "pottedplant", "sheep", "sofa", "train", "tvmonitor",
-        ]
+        Args:
+            frame: BGR 彩色图像 (H×W×3 numpy uint8 数组)
 
-    def detect(self, frame, confidence_threshold=0.5):
-        if self.method == "haar":
+        Returns:
+            list[dict]: 检测结果列表，每项包含:
+              - "bbox":       (x, y, w, h) 边界框像素坐标
+              - "label":      str 类别名称 (如 "face")
+              - "confidence": float 置信度 (0.0 ~ 1.0)
+        """
+        if self.method == "vj":
+            return self._detect_vj(frame)
+        elif self.method == "haar":
             return self._detect_haar(frame)
-        elif self.method == "dnn":
-            return self._detect_dnn(frame, confidence_threshold)
         return []
 
-    def _detect_haar(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
+    # ── Viola-Jones 自实现 ───────────────────────────────
 
-        faces = self.face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
+    def _detect_vj(self, frame: np.ndarray) -> list[dict]:
+        """使用论文自实现的 Viola-Jones 检测器。
+
+        处理管线:
+          1. BGR → Gray (灰度转换)
+          2. 直方图均衡化 (CascadeDetector 内部自动处理)
+          3. 多尺度滑动窗口 + 级联评估 (Numba JIT 加速)
+          4. NMS (非极大值抑制) 合并重叠框
+
+        Args:
+            frame: BGR 彩色图像
+
+        Returns:
+            统一格式的检测结果列表
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # 多尺度级联检测 (scale_factor=1.25 对应论文推荐值)
+        boxes = self.vj_detector.detect(
+            gray,
+            scale_factor=1.25,       # 每级放大 1.25x
+            min_size=30,             # 最小检测窗口 30px
+            overlap_threshold=0.3,   # NMS IoU 阈值
         )
 
-        results = []
+        # 转换为统一格式
+        results: list[dict] = []
+        for i in range(len(boxes)):
+            x, y, w, h = boxes[i]
+            results.append({
+                "bbox": (int(x), int(y), int(w), int(h)),
+                "label": "face",
+                "confidence": 0.95,  # 级联无连续置信度，用固定高值表示通过
+            })
+        return results
+
+    # ── OpenCV 内置 Haar Cascade (对照) ───────────────────
+
+    def _detect_haar(self, frame: np.ndarray) -> list[dict]:
+        """使用 OpenCV 内置 Haar Cascade 检测（对照参考）。
+
+        处理管线:
+          1. BGR → Gray
+          2. 直方图均衡化 (增强对比度)
+          3. detectMultiScale (OpenCV 内部优化的级联检测)
+
+        Args:
+            frame: BGR 彩色图像
+
+        Returns:
+            统一格式的检测结果列表
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)  # 直方图均衡化
+
+        faces = self.face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,        # 缩放步长
+            minNeighbors=5,          # 邻接框数阈值 (越大越严格)
+            minSize=(30, 30),        # 最小检测尺寸
+        )
+
+        results: list[dict] = []
         for (x, y, w, h) in faces:
             results.append({
-                "bbox": (x, y, w, h),
+                "bbox": (int(x), int(y), int(w), int(h)),
                 "label": "face",
-                "confidence": 1.0,
+                "confidence": 1.0,   # OpenCV 级联不返回置信度
             })
         return results
 
-    def _detect_dnn(self, frame, confidence_threshold):
-        h, w = frame.shape[:2]
-        blob = cv2.dnn.blobFromImage(frame, 0.007843, (300, 300), 127.5)
-        self.net.setInput(blob)
-        detections = self.net.forward()
 
-        results = []
-        for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
-            if confidence < confidence_threshold:
-                continue
-            class_id = int(detections[0, 0, i, 1])
-            box = detections[0, 0, i, 3:7] * [w, h, w, h]
-            x1, y1, x2, y2 = box.astype("int")
-            results.append({
-                "bbox": (x1, y1, x2 - x1, y2 - y1),
-                "label": self.class_names[class_id] if class_id < len(self.class_names) else "unknown",
-                "confidence": float(confidence),
-            })
-        return results
