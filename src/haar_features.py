@@ -68,92 +68,12 @@ class HaarFeature:
 #   - 基础矩形尺寸: (w, h)，其中 1≤w≤window_w, 1≤h≤window_h
 #   - 需要 2 个并排矩形 → 总宽度 2w ≤ window_w → w ≤ window_w/2
 #   - 左上角位置: x ∈ [0, window_w-2w], y ∈ [0, window_h-h]
-
-def generate_features(
-    window_w: int = 24,
-    window_h: int = 24,
-) -> list[HaarFeature]:
-    """生成窗口内所有可能的 Haar-like 特征模板。
-
-    按"先定位置和尺寸，再判断类型是否合法"的顺序枚举。
-    每个类型的循环结构相同，只是约束条件不同。
-
-    ── 时间复杂度 ──
-    四层嵌套 (x, y, w, h)，每层 O(window_dim)，总计 O(W²H²)。
-    对于 24×24 约 162k 个特征
-
-    Args:
-        window_w, window_h: 检测窗口尺寸 24*24
-
-    Returns:
-        HaarFeature 列表，包含所有合法特征模板
-    """
-    features: list[HaarFeature] = []
-
-    for y in range(window_h):
-        for x in range(window_w):
-            for h in range(1, window_h - y + 1):
-                for w in range(1, window_w - x + 1):
-                    if x + 2 * w <= window_w:                   # 两个矩形不能出界
-                        r1 = FeatureRect(x, y, w, h, 1.0)       # 左白
-                        r2 = FeatureRect(x + w, y, w, h, -1.0)  # 右黑
-                        features.append(HaarFeature([r1, r2], "2h"))
-
-
-    for y in range(window_h):
-        for x in range(window_w):
-            for h in range(1, window_h - y + 1):
-                if y + 2 * h <= window_h:                       # 两个矩形不能出界
-                    for w in range(1, window_w - x + 1):
-                        r1 = FeatureRect(x, y, w, h, 1.0)       # 上白
-                        r2 = FeatureRect(x, y + h, w, h, -1.0)  # 下黑
-                        features.append(HaarFeature([r1, r2], "2v"))
-
-
-    for y in range(window_h):
-        for x in range(window_w):
-            for h in range(1, window_h - y + 1):
-                for w in range(1, window_w - x + 1):
-                    if x + 3 * w <= window_w:                    # 三个矩形不能出界
-                        r1 = FeatureRect(x, y, w, h, 1.0)
-                        r2 = FeatureRect(x + w, y, w, h, -2.0)
-                        r3 = FeatureRect(x + 2 * w, y, w, h, 1.0)
-                        features.append(HaarFeature([r1, r2, r3], "3h"))
-
-    # ── 三矩形垂直 (3v): 白-黑-白，各 w×h ──
-    for y in range(window_h):
-        for x in range(window_w):
-            for h in range(1, window_h - y + 1):
-                if y + 3 * h <= window_h:
-                    for w in range(1, window_w - x + 1):
-                        r1 = FeatureRect(x, y, w, h, 1.0)
-                        r2 = FeatureRect(x, y + h, w, h, -2.0)
-                        r3 = FeatureRect(x, y + 2 * h, w, h, 1.0)
-                        features.append(HaarFeature([r1, r2, r3], "3v"))
-
-
-    for y in range(window_h):
-        for x in range(window_w):
-            for h in range(1, window_h - y + 1):
-                if y + 2 * h <= window_h:
-                    for w in range(1, window_w - x + 1):
-                        if x + 2 * w <= window_w:
-                            r1 = FeatureRect(x, y, w, h, 1.0)          # 左上 白
-                            r2 = FeatureRect(x + w, y, w, h, -1.0)     # 右上 黑
-                            r3 = FeatureRect(x, y + h, w, h, -1.0)     # 左下 黑
-                            r4 = FeatureRect(x + w, y + h, w, h, 1.0)  # 右下 白
-                            features.append(HaarFeature([r1, r2, r3, r4], "4"))
-
-    return features
-
-
 def generate_features_fast(
     window_w: int = 24,
     window_h: int = 24,
 ) -> list[HaarFeature]:
     """快速生成特征模板 —— 优化循环顺序减少重复判断。
-    与 generate_features 生成完全相同的特征集合，但通过把 (w,h)
-    提到最外层来减少内层循环的边界检查次数。
+    但通过把 (w,h)提到最外层来减少内层循环的边界检查次数。
 
     循环结构:
       for w, h (矩形尺寸):       ← 外层: 先定尺寸
